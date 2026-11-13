@@ -4,8 +4,10 @@ name: Release
 # here because Actions are free in public repos; the source is checked out on the runner and never
 # committed to this repo.
 #
-# Run: Actions > Release > Run workflow, on main (or gh workflow run release.yml -R
-# PouriahLabs/tokenomics-releases --ref main [-f bump=minor]). It bumps the version in the source
+# Runs by itself after every push to the source repo's main: that push starts CI here (via the
+# source repo's ship.yml), and a passing CI starts this with a patch bump. By hand, for a minor or
+# major version: Actions > Release > Run workflow, on main (or gh workflow run release.yml -R
+# PouriahLabs/tokenomics-releases --ref main -f bump=minor). It bumps the version in the source
 # repo, tags it, builds macOS (Apple Silicon, Intel) and Windows, uploads them here with signed
 # updater artifacts and latest.json, and publishes once all three builds pass.
 #
@@ -14,6 +16,10 @@ name: Release
 # Logs here are public: command output goes to files and only a summary is printed; on failure the
 # output is uploaded encrypted with LOG_KEY.
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       bump:
@@ -36,7 +42,11 @@ permissions:
 jobs:
   # Cheap Linux job: the new version, committed to the source repo's main and tagged there.
   version:
-    if: github.ref == 'refs/heads/main'
+    # By hand on main, or after a passing CI that a push to the source repo started.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.display_title == 'CI → release')
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.bump.outputs.tag }}
@@ -50,7 +60,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          v="$(node scripts/bump-version.mjs "${{ inputs.bump }}")"
+          v="$(node scripts/bump-version.mjs "${{ inputs.bump || 'patch' }}")"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -qam "Release $v"
@@ -202,7 +212,7 @@ jobs:
   # All three builds passed: publish, which is when installed apps see the update.
   publish:
     needs: [version, build]
-    if: inputs.publish
+    if: github.event_name == 'workflow_run' || inputs.publish
     runs-on: ubuntu-latest
     permissions:
       contents: write

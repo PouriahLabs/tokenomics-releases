@@ -1,4 +1,7 @@
 name: CI
+# The title carries "→ release" when a push to the source repo's main started it: Release (release.yml)
+# runs after a passing CI only for those.
+run-name: ${{ inputs.release && 'CI → release' || format('CI {0}', inputs.ref) }}
 
 # Tests and lints for the private source repo (PouriahLabs/tokenomics), run here because Actions are
 # free in public repos. Manual only: gh workflow run ci.yml -R PouriahLabs/tokenomics-releases
@@ -11,6 +14,10 @@ on:
       ref:
         description: Branch, tag or commit of PouriahLabs/tokenomics to check
         default: main
+      release:
+        description: Release a patch version when this passes (set by pushes to the source repo's main)
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ inputs.ref }}
