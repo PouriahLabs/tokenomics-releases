@@ -1,0 +1,130 @@
+name: CI
+
+# Tests and lints for the private source repo (PouriahLabs/tokenomics), run here because Actions are
+# free in public repos. Manual only: gh workflow run ci.yml -R PouriahLabs/tokenomics-releases
+# --ref main [-f ref=<branch or sha>]. One macOS and one Windows target cover each platform's cfg
+# code. Logs here are public: output goes to files and only pass/fail and counts are printed; on
+# failure the output is uploaded encrypted with LOG_KEY.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit of PouriahLabs/tokenomics to check
+        default: main
+
+concurrency:
+  group: ci-${{ inputs.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    env:
+      HAS_LOG_KEY: ${{ secrets.LOG_KEY != '' }}
+    steps:
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
+      - uses: actions/checkout@v4
+        with:
+          repository: PouriahLabs/tokenomics
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+
+      - name: Quiet logging
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          cat > "$RUNNER_TEMP/quiet.sh" <<'EOF'
+          quiet() {
+            local name="$1"; shift
+            if "$@" > "$RUNNER_TEMP/logs/$name.log" 2>&1; then echo "ok: $name"; else
+              echo "::error::$name failed. Its output is not shown in this public log (see the encrypted logs artifact)."; return 1; fi
+          }
+          EOF
+          echo "BASH_ENV=$RUNNER_TEMP/quiet.sh" >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install
+        shell: bash
+        run: quiet install pnpm install --frozen-lockfile
+
+      - name: Node tests
+        shell: bash
+        run: |
+          status=0
+          quiet node-tests pnpm test || status=1
+          grep -E '^ℹ (tests|pass|fail)' "$RUNNER_TEMP/logs/node-tests.log" || true
+          exit $status
+
+      - name: Sidecars
+        shell: bash
+        run: |
+          quiet sidecar node scripts/build-sidecar.mjs --target ${{ matrix.target }}
+          quiet ptyd node scripts/build-ptyd.mjs --target ${{ matrix.target }}
+
+      - name: Rust format
+        shell: bash
+        run: quiet fmt cargo fmt --all --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Rust lints
+        shell: bash
+        run: quiet clippy cargo clippy --workspace --all-targets --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} -- -D warnings
+
+      # Terminals on a real pseudo-console, and the terminal host over its pipe / socket.
+      - name: Rust tests
+        shell: bash
+        run: |
+          status=0
+          quiet rust-tests cargo test --workspace --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} || status=1
+          grep -E '^test result' "$RUNNER_TEMP/logs/rust-tests.log" || true
+          exit $status
+
+      # Decrypt: openssl enc -d -aes-256-cbc -pbkdf2 -pass file:<key> -in logs.tgz.enc | tar xz
+      - name: Encrypted logs
+        if: failure() && env.HAS_LOG_KEY == 'true'
+        shell: bash
+        env:
+          LOG_KEY: ${{ secrets.LOG_KEY }}
+        run: tar czf - -C "$RUNNER_TEMP" logs | openssl enc -aes-256-cbc -pbkdf2 -pass env:LOG_KEY -out logs.tgz.enc
+      - uses: actions/upload-artifact@v4
+        if: failure() && env.HAS_LOG_KEY == 'true'
+        with:
+          name: logs-${{ matrix.target }}
+          path: logs.tgz.enc
+          if-no-files-found: ignore
+          retention-days: 3

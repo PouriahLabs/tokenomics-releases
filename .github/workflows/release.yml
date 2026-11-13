@@ -1,0 +1,216 @@
+name: Release
+
+# Builds and publishes Tokenomics from its private source repo (PouriahLabs/tokenomics). It runs
+# here because Actions are free in public repos; the source is checked out on the runner and never
+# committed to this repo.
+#
+# Run: Actions > Release > Run workflow, on main (or gh workflow run release.yml -R
+# PouriahLabs/tokenomics-releases --ref main [-f bump=minor]). It bumps the version in the source
+# repo, tags it, builds macOS (Apple Silicon, Intel) and Windows, uploads them here with signed
+# updater artifacts and latest.json, and publishes once all three builds pass.
+#
+# Secrets (this repo): SOURCE_TOKEN (fine-grained, Contents read/write on PouriahLabs/tokenomics
+# only), TAURI_SIGNING_PRIVATE_KEY, MACOS_SIGNING_P12 + MACOS_SIGNING_P12_PASSWORD, LOG_KEY.
+# Logs here are public: command output goes to files and only a summary is printed; on failure the
+# output is uploaded encrypted with LOG_KEY.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      publish:
+        description: Publish when the builds pass (off = leave a draft to test first)
+        type: boolean
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Cheap Linux job: the new version, committed to the source repo's main and tagged there.
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: PouriahLabs/tokenomics
+          ref: main
+          token: ${{ secrets.SOURCE_TOKEN }}
+      - id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(node scripts/bump-version.mjs "${{ inputs.bump }}")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qam "Release $v"
+          git tag "v$v"
+          git push -q origin HEAD:main "v$v"
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          echo "### Releasing v$v" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: version
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          # Intel on an Intel runner: the Apple Silicon pool is often short of machines.
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    env:
+      HAS_MAC_SIGNING: ${{ secrets.MACOS_SIGNING_P12 != '' }}
+      HAS_LOG_KEY: ${{ secrets.LOG_KEY != '' }}
+    steps:
+      # Defender scans every file the compiler writes; on a throwaway runner that only costs time.
+      - name: Windows Defender real-time scanning off
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
+      - uses: actions/checkout@v4
+        with:
+          repository: PouriahLabs/tokenomics
+          ref: ${{ needs.version.outputs.tag }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+
+      # quiet <name> <command...>: runs it with its output in a file; prints only whether it passed.
+      - name: Quiet logging
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          cat > "$RUNNER_TEMP/quiet.sh" <<'EOF'
+          quiet() {
+            local name="$1"; shift
+            if "$@" > "$RUNNER_TEMP/logs/$name.log" 2>&1; then echo "ok: $name"; else
+              echo "::error::$name failed. Its output is not shown in this public log (see the encrypted logs artifact)."; return 1; fi
+          }
+          EOF
+          echo "BASH_ENV=$RUNNER_TEMP/quiet.sh" >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Per target, saved only from main: a cache saved on any other ref is never seen again.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install
+        shell: bash
+        run: quiet install pnpm install --frozen-lockfile
+
+      - name: Node tests
+        shell: bash
+        run: |
+          quiet node-tests pnpm test || { grep -E '^(ℹ|✖)' "$RUNNER_TEMP/logs/node-tests.log" | grep -E 'tests|pass|fail' || true; exit 1; }
+          grep -E '^ℹ (tests|pass|fail)' "$RUNNER_TEMP/logs/node-tests.log" || true
+
+      # macOS: sign with one self-signed certificate instead of ad hoc, so the app keeps its identity
+      # (and its folder permissions) across releases. Without the secret it falls back to ad hoc.
+      - name: Stable macOS signing identity
+        if: runner.os == 'macOS' && env.HAS_MAC_SIGNING == 'true'
+        shell: bash
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpw="$(openssl rand -hex 16)"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          security import "$RUNNER_TEMP/signing.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security > /dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security find-certificate -c "Tokenomics Self-Signed" -p "$kc" > "$RUNNER_TEMP/signing.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.pem"
+          rm -f "$RUNNER_TEMP/signing.p12"
+          security find-identity -v -p codesigning "$kc" | grep -q "Tokenomics Self-Signed"
+          echo "MAC_SIGN_CONFIG=--config src-tauri/tauri.selfsigned.conf.json" >> "$GITHUB_ENV"
+
+      # Builds the Node core and terminal host sidecars (beforeBuildCommand), the app and its
+      # installers, and uploads them with latest.json to a draft release in this repo.
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          owner: PouriahLabs
+          repo: tokenomics-releases
+          releaseCommitish: main
+          tagName: ${{ needs.version.outputs.tag }}
+          releaseName: 'Tokenomics ${{ needs.version.outputs.tag }}'
+          releaseBody: 'See the assets below. macOS builds are not notarized: on first launch, right-click the app and choose Open.'
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          # Windows: the NSIS setup.exe only (the updater and the npx installer use it).
+          args: --target ${{ matrix.target }} ${{ runner.os == 'Windows' && '--bundles nsis' || '' }} ${{ secrets.TAURI_SIGNING_PRIVATE_KEY == '' && '--config src-tauri/tauri.unsigned.conf.json' || '' }} ${{ env.MAC_SIGN_CONFIG }}
+
+      # Failure output, encrypted: only someone with LOG_KEY can read it.
+      # Decrypt: openssl enc -d -aes-256-cbc -pbkdf2 -pass file:<key> -in logs.tgz.enc | tar xz
+      - name: Encrypted logs
+        if: failure() && env.HAS_LOG_KEY == 'true'
+        shell: bash
+        env:
+          LOG_KEY: ${{ secrets.LOG_KEY }}
+        run: tar czf - -C "$RUNNER_TEMP" logs | openssl enc -aes-256-cbc -pbkdf2 -pass env:LOG_KEY -out logs.tgz.enc
+      - uses: actions/upload-artifact@v4
+        if: failure() && env.HAS_LOG_KEY == 'true'
+        with:
+          name: logs-${{ matrix.target }}
+          path: logs.tgz.enc
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # All three builds passed: publish, which is when installed apps see the update.
+  publish:
+    needs: [version, build]
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          gh release edit "$TAG" -R PouriahLabs/tokenomics-releases --draft=false --latest
+          echo "### Published $TAG" >> "$GITHUB_STEP_SUMMARY"

@@ -15,3 +15,7 @@ Download the latest release:
 macOS builds are ad-hoc signed: on first launch, right-click the app and choose **Open**.
 
 Installed apps update themselves from `releases/latest/download/latest.json` (signed with the app's updater key).
+## Builds
+
+The workflows in .github/workflows build the releases (and run the test suite) from the private source repo; they run only when started by hand, and their logs print no source output.
+
