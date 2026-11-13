@@ -1,0 +1,10 @@
+{
+  "name": "tokenomics-live",
+  "version": "0.3.0",
+  "description": "Live session status for the Tokenomics desktop app: working, needs permission, idle, ended. Sends hook events to 127.0.0.1:53821 only, and stays silent when the app isn't running. Needs node on PATH.",
+  "author": { "name": "PouriahLabs" },
+  "homepage": "https://github.com/PouriahLabs/tokenomics-releases",
+  "repository": "https://github.com/PouriahLabs/tokenomics-releases",
+  "license": "MIT",
+  "keywords": ["tokenomics", "monitoring", "hooks"]
+}

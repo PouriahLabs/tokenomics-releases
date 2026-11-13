@@ -1,0 +1,12 @@
+{
+  "name": "tokenomics",
+  "description": "Plugins for the Tokenomics Claude Code monitor",
+  "owner": { "name": "PouriahLabs" },
+  "plugins": [
+    {
+      "name": "tokenomics-live",
+      "source": "./plugins/tokenomics-live",
+      "description": "Live session status for the Tokenomics desktop app"
+    }
+  ]
+}

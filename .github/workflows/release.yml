@@ -207,6 +207,38 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The Claude Code plugin (and its marketplace file) live here so anyone can install it; each
+      # release copies the source repo's version, so the two never drift.
+      - uses: actions/checkout@v4
+        with:
+          path: releases
+      - uses: actions/checkout@v4
+        with:
+          repository: PouriahLabs/tokenomics
+          ref: ${{ needs.version.outputs.tag }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          path: source
+          sparse-checkout: |
+            plugins/tokenomics-live
+            .claude-plugin
+          persist-credentials: false
+      - name: Sync the plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf releases/plugins/tokenomics-live
+          mkdir -p releases/plugins releases/.claude-plugin
+          cp -R source/plugins/tokenomics-live releases/plugins/
+          cp source/.claude-plugin/marketplace.json releases/.claude-plugin/
+          cd releases
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A plugins .claude-plugin
+            git commit -qm "Plugin from ${{ needs.version.outputs.tag }}"
+            git push -q
+            echo "Plugin updated" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
