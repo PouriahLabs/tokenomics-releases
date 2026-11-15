@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // tokenomics-hook: forwards a coding CLI's hook payload (JSON on stdin) to the local Tokenomics app.
 //   node tokenomics-hook.mjs <provider> [event]
-// provider: codex | copilot | gemini | cursor (Claude Code uses its own http hooks). event is the CLI's
+// provider: codex | copilot | gemini | cursor (Claude Code reports through the plugin's hooks/relay.mjs). event is the CLI's
 // native hook name; it is added to the payload when the CLI doesn't include it.
 // Silent and always exit 0: when the app isn't running, or answers with no decision, nothing is
 // printed and the CLI carries on as if the hook were absent. A decision from the app (approve /
