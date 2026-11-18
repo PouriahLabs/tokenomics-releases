@@ -1,5 +1,5 @@
 {
-  "description": "Reports Claude Code session activity to the local Tokenomics app (127.0.0.1:53821). Silent when the app is not running. Needs node on PATH.",
+  "description": "Reports Claude Code session activity to the local Tokenomics app (127.0.0.1:23821). Silent when the app is not running. Needs node on PATH.",
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/relay.mjs\"", "timeout": 5 }] }

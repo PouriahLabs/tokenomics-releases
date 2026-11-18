@@ -10,7 +10,8 @@
 import http from 'node:http';
 
 const [, , provider = 'claude', eventArg = ''] = process.argv;
-const PORT = Number(process.env.TOKENOMICS_PORT) || 53821;
+// The app listens on 23821; one from before the port moved listens on 53821 only.
+const PORTS = Number(process.env.TOKENOMICS_PORT) ? [Number(process.env.TOKENOMICS_PORT)] : [23821, 53821];
 const DECISION_EVENTS = /^(PermissionRequest|permissionRequest|beforeShellExecution|beforeMCPExecution)$/;
 
 const done = () => process.exit(0);
@@ -37,19 +38,23 @@ if (eventArg && !payload.hook_event_name && !payload.hookEventName && !payload.e
 const body = JSON.stringify(payload);
 const timeout = DECISION_EVENTS.test(String(event)) ? 600_000 : 5_000;
 
-const req = http.request({
-  host: '127.0.0.1', port: PORT, method: 'POST', path: `/hooks?provider=${encodeURIComponent(provider)}`, agent: false,
-  headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'X-Tokenomics': '1' },
-}, res => {
-  let out = '';
-  res.setEncoding('utf8');
-  res.on('data', c => { out += c; });
-  res.on('end', () => {
-    if (res.statusCode === 200 && out.trim()) process.stdout.write(out, done);
-    else done();
+function post(i) {
+  const req = http.request({
+    host: '127.0.0.1', port: PORTS[i], method: 'POST', path: `/hooks?provider=${encodeURIComponent(provider)}`, agent: false,
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'X-Tokenomics': '1' },
+  }, res => {
+    let out = '';
+    res.setEncoding('utf8');
+    res.on('data', c => { out += c; });
+    res.on('end', () => {
+      if (res.statusCode === 200 && out.trim()) process.stdout.write(out, done);
+      else done();
+    });
+    res.on('error', done);
   });
-  res.on('error', done);
-});
-req.setTimeout(timeout, () => { req.destroy(); done(); });
-req.on('error', done);
-req.end(body);
+  req.setTimeout(timeout, () => { req.destroy(); done(); });
+  // Refused: nothing listens on this port, so try the next one. Any other failure ends it.
+  req.on('error', e => (e?.code === 'ECONNREFUSED' && i + 1 < PORTS.length ? post(i + 1) : done()));
+  req.end(body);
+}
+post(0);
