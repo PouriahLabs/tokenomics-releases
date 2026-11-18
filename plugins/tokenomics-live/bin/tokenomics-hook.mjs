@@ -34,6 +34,7 @@ if (!payload || typeof payload !== 'object' || Array.isArray(payload)) done();
 
 const event = payload.hook_event_name ?? payload.hookEventName ?? payload.event ?? eventArg;
 if (eventArg && !payload.hook_event_name && !payload.hookEventName && !payload.event) payload.hook_event_name = eventArg;
+if (process.env.TOKENOMICS_PTY_ID) payload.tokenomics_pty_id = process.env.TOKENOMICS_PTY_ID;
 
 const body = JSON.stringify(payload);
 const timeout = DECISION_EVENTS.test(String(event)) ? 600_000 : 5_000;
