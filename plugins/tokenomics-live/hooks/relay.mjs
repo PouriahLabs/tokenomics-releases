@@ -11,6 +11,14 @@ const permission = process.argv[2] === 'permission';
 
 let body = '';
 for await (const chunk of process.stdin) body += chunk;
+const ptyId = process.env.TOKENOMICS_PTY_ID;
+if (ptyId) {
+  try {
+    const event = JSON.parse(body);
+    event.tokenomics_pty_id = ptyId;
+    body = JSON.stringify(event);
+  } catch (_) { /* leave the original payload for the core to validate */ }
+}
 
 for (const url of URLS) {
   try {
