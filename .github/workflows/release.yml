@@ -12,7 +12,8 @@ name: Release
 # updater artifacts and latest.json, and publishes once all three builds pass.
 #
 # Secrets (this repo): SOURCE_TOKEN (fine-grained, Contents read/write on PouriahLabs/tokenomics
-# only), TAURI_SIGNING_PRIVATE_KEY, MACOS_SIGNING_P12 + MACOS_SIGNING_P12_PASSWORD, LOG_KEY.
+# only), TAURI_SIGNING_PRIVATE_KEY, MACOS_SIGNING_P12 + MACOS_SIGNING_P12_PASSWORD, LOG_KEY,
+# ANTHROPIC_API_KEY or OPENAI_API_KEY (optional: writes the release notes from the diff; see the source repo's RELEASING.md).
 # Logs here are public: command output goes to files and only a summary is printed; on failure the
 # output is uploaded encrypted with LOG_KEY.
 on:
@@ -56,11 +57,21 @@ jobs:
           repository: PouriahLabs/tokenomics
           ref: main
           token: ${{ secrets.SOURCE_TOKEN }}
+          # Full history and tags: the release notes read everything since the last tag.
+          fetch-depth: 0
       - id: bump
         shell: bash
+        env:
+          # One is enough (Anthropic wins when both are set); with neither, the notes are commit subjects.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           v="$(node scripts/bump-version.mjs "${{ inputs.bump || 'patch' }}")"
+          # What changed, into public/changelog.json (ships in the app). Prints one line, never the
+          # diff; without the key it lists commit subjects; a failure never stops the release.
+          node scripts/release-notes.mjs add "$v" || echo "::warning::Release notes were not written for $v."
+          git add public/changelog.json 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -qam "Release $v"
@@ -172,6 +183,20 @@ jobs:
           security find-identity -v -p codesigning "$kc" | grep -q "Tokenomics Self-Signed"
           echo "MAC_SIGN_CONFIG=--config src-tauri/tauri.selfsigned.conf.json" >> "$GITHUB_ENV"
 
+      # The release body: this version's notes, and the last ten versions as hidden JSON. tauri-action
+      # copies it into latest.json, which is how the app's update prompt gets what changed.
+      - name: Release notes
+        id: notes
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          {
+            echo 'body<<TOKENOMICS_NOTES_EOF'
+            node scripts/release-notes.mjs body "${TAG#v}" || echo 'macOS builds are not notarized: on first launch, right-click the app and choose Open.'
+            echo 'TOKENOMICS_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       # Builds the Node core and terminal host sidecars (beforeBuildCommand), the app and its
       # installers, and uploads them with latest.json to a draft release in this repo.
       - uses: tauri-apps/tauri-action@v1
@@ -185,7 +210,7 @@ jobs:
           releaseCommitish: main
           tagName: ${{ needs.version.outputs.tag }}
           releaseName: 'Tokenomics ${{ needs.version.outputs.tag }}'
-          releaseBody: 'See the assets below. macOS builds are not notarized: on first launch, right-click the app and choose Open.'
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           uploadUpdaterJson: true
