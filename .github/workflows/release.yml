@@ -79,6 +79,8 @@ jobs:
           git push -q origin HEAD:main "v$v"
           echo "tag=v$v" >> "$GITHUB_OUTPUT"
           echo "### Releasing v$v" >> "$GITHUB_STEP_SUMMARY"
+          # The same notes on this run's summary page (they are public on the release page anyway).
+          node scripts/release-notes.mjs body "$v" >> "$GITHUB_STEP_SUMMARY" || true
 
   build:
     needs: version
