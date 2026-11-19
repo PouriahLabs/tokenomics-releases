@@ -221,6 +221,8 @@ jobs:
       # release copies the source repo's version, so the two never drift.
       - uses: actions/checkout@v4
         with:
+          # The branch tip, not the event's commit: an earlier queued release may have pushed since.
+          ref: main
           path: releases
       - uses: actions/checkout@v4
         with:
