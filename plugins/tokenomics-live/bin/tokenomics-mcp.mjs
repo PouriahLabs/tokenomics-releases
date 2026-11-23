@@ -5,7 +5,7 @@
 //   TOKENOMICS_RUN_TOKEN  that run's token (its MCP routes only; it cannot act for the user)
 //   TOKENOMICS_AGENT      which of the run's agents this is
 //   TOKENOMICS_MCP_TOOLS  "approve": the permission-prompt tool of a run's worker
-//                         "chief":   the Chief of staff's tools (start sessions, wait, report)
+//                         "chief":   the Chief of staff's tools (start sessions, wait, push when asked, report)
 //   TOKENOMICS_PORT       the core's port (default 23821)
 import http from 'node:http';
 import { createInterface } from 'node:readline';
@@ -40,6 +40,13 @@ const TOOLS = {
     { name: 'session_followup', description: 'Sends another prompt to a session or pair that has finished or stopped. It keeps its context.', inputSchema: { type: 'object', properties: { id: str('The id from session_start or pair_start'), prompt: str('What to do next') }, required: ['id', 'prompt'] } },
     { name: 'session_wait', description: 'Waits until one of the run’s sessions finishes, fails or needs the user (or a few minutes pass), then returns every session’s state. Call it again to keep waiting.', inputSchema: { type: 'object', properties: { seconds: { type: 'integer', minimum: 5, maximum: 240, description: 'Longest wait (default 240)' } } } },
     { name: 'session_status', description: 'One session or pair in detail: its state, its last reply, what it changed, what it cost.', inputSchema: { type: 'object', properties: { id: str('The id') }, required: ['id'] } },
+    { name: 'git_push', description: 'Pushes when the USER has asked you to push (and, if they asked, merges sessions’ branches into the checkout’s branch first). The user confirms it in Tokenomics before anything happens; nothing is ever forced. Never call it for a push the user did not ask for.',
+      inputSchema: { type: 'object', properties: {
+        user_request: str('The user’s own words asking for the push'),
+        merge: { type: 'array', items: { type: 'string' }, description: 'Optional ids of sessions whose branches to merge into the checkout’s branch before pushing' },
+        branch: str('Optional: the branch to push. Leave out for the checkout’s current branch.'),
+        remote: str('Optional: the remote (default origin)'),
+      }, required: ['user_request'] } },
     { name: 'run_report', description: 'Files the report the user reads when the jobs are over: what is done and what needs them. Call it once, last.',
       inputSchema: { type: 'object', properties: { summary: str('Two or three sentences'), done: { type: 'array', items: { type: 'string' } }, needs_user: { type: 'array', items: { type: 'string' } } }, required: ['summary'] } },
   ],
@@ -64,8 +71,8 @@ function call(tool, args) {
       });
       res.on('error', e => resolve({ error: e.message }));
     });
-    // A permission waits for a person; the core gives up before this does.
-    req.setTimeout(620_000, () => { req.destroy(); resolve({ error: 'Tokenomics did not answer in time.' }); });
+    // A permission waits for a person (nine minutes, and a push after it may take two more); the core gives up before this does.
+    req.setTimeout(700_000, () => { req.destroy(); resolve({ error: 'Tokenomics did not answer in time.' }); });
     req.on('error', e => resolve({ error: e.code === 'ECONNREFUSED' ? 'Tokenomics is not running.' : e.message }));
     req.end(body);
   });
