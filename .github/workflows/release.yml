@@ -49,8 +49,11 @@ jobs:
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.display_title == 'CI → release')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       tag: ${{ steps.bump.outputs.tag }}
+      release: ${{ steps.draft.outputs.id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,6 +84,28 @@ jobs:
           echo "### Releasing v$v" >> "$GITHUB_STEP_SUMMARY"
           # The same notes on this run's summary page (they are public on the release page anyway).
           node scripts/release-notes.mjs body "$v" >> "$GITHUB_STEP_SUMMARY" || true
+
+      # One draft release, made here before any build starts, and passed to the builds by id. Left to
+      # tauri-action, the three builds each looked for the release by tag at the same moment and two
+      # of them could each make one: v1.1.93 was published with the Intel Mac build only, its Windows
+      # and Apple Silicon builds left in a second draft that no installed app could see.
+      - id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          set -euo pipefail
+          repo=PouriahLabs/tokenomics-releases
+          # A run started again for the same version keeps its draft.
+          id="$(gh api "repos/$repo/releases?per_page=30" --jq "[.[] | select(.draft and .tag_name == \"$TAG\")][0].id // empty")"
+          if [ -z "$id" ]; then
+            node scripts/release-notes.mjs body "${TAG#v}" > "$RUNNER_TEMP/body.md" 2>/dev/null \
+              || echo 'macOS builds are not notarized: on first launch, right-click the app and choose Open.' > "$RUNNER_TEMP/body.md"
+            id="$(gh api "repos/$repo/releases" -f tag_name="$TAG" -f target_commitish=main -f name="Tokenomics $TAG" \
+              -F draft=true -F prerelease=false -F body=@"$RUNNER_TEMP/body.md" --jq .id)"
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
 
   build:
     needs: version
@@ -200,7 +225,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # Builds the Node core and terminal host sidecars (beforeBuildCommand), the app and its
-      # installers, and uploads them with latest.json to a draft release in this repo.
+      # installers, and uploads them with latest.json to the version job's draft (by id: each build
+      # adds its platform to the same release and the same latest.json).
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -209,6 +235,7 @@ jobs:
         with:
           owner: PouriahLabs
           repo: tokenomics-releases
+          releaseId: ${{ needs.version.outputs.release }}
           releaseCommitish: main
           tagName: ${{ needs.version.outputs.tag }}
           releaseName: 'Tokenomics ${{ needs.version.outputs.tag }}'
@@ -278,10 +305,21 @@ jobs:
             git push -q
             echo "Plugin updated" >> "$GITHUB_STEP_SUMMARY"
           fi
+      # By id, not by tag: a tag can name more than one release while they are drafts. It must hold
+      # every platform first: a latest.json missing one leaves that platform's apps without the update.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.version.outputs.tag }}
+          ID: ${{ needs.version.outputs.release }}
         run: |
-          gh release edit "$TAG" -R PouriahLabs/tokenomics-releases --draft=false --latest
+          set -euo pipefail
+          repo=PouriahLabs/tokenomics-releases
+          json="$(gh api "repos/$repo/releases/$ID" --jq '.assets[] | select(.name == "latest.json") | .id')"
+          [ -n "$json" ] || { echo "::error::$TAG has no latest.json: not published."; exit 1; }
+          platforms="$(gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$json" | jq -r '.platforms | keys | join(" ")')"
+          for p in darwin-aarch64 darwin-x86_64 windows-x86_64; do
+            case " $platforms " in *" $p "*) ;; *) echo "::error::$TAG's latest.json has no $p (it has: $platforms): not published."; exit 1 ;; esac
+          done
+          gh api -X PATCH "repos/$repo/releases/$ID" -F draft=false -f make_latest=true > /dev/null
           echo "### Published $TAG" >> "$GITHUB_STEP_SUMMARY"
