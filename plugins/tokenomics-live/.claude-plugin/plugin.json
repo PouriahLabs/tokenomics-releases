@@ -1,6 +1,6 @@
 {
   "name": "tokenomics-live",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Live session status for the Tokenomics desktop app: working, needs permission, idle, ended. Sends hook events to 127.0.0.1 (port 23821, or 53821 for older apps) only, and stays silent when the app isn't running. Needs node on PATH.",
   "author": { "name": "PouriahLabs" },
   "homepage": "https://github.com/PouriahLabs/tokenomics-releases",
